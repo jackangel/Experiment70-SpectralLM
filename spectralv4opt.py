@@ -437,7 +437,7 @@ if __name__ == "__main__":
     n_frequencies = 256 # Slightly reduced to allow larger batch/seq
     n_layers = 6        # Deeper model
     n_heads = 6
-    batch_size = 10
+    batch_size = 10     # Reduced batch size to fit 512 seq_len in VRAM
     seq_len = 512       # CRITICAL: Increased context window
     learning_rate = 6e-4 # Slightly higher start for spectral convergence
     
@@ -461,14 +461,25 @@ if __name__ == "__main__":
     
     if mode == '1':
         with open("input.txt", "r", encoding="utf-8") as f: text = f.read()
-        data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
+        full_data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
+        
+        # --- DATA SPLIT FIX ---
+        n = int(0.9 * len(full_data)) # 90% Train, 10% Validation
+        train_data = full_data[:n]
+        val_data = full_data[n:]
+        
+        print(f"Total tokens: {len(full_data):,}")
+        print(f"Training on:  {len(train_data):,} tokens")
+        print(f"Validating on: {len(val_data):,} tokens")
+        # ----------------------
         
         # Scheduler for standard training
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50000)
         
         best_loss = float('inf')
         for i in range(50000):
-            x, y = get_batch(data, batch_size, seq_len, device)
+            # Train on train_data
+            x, y = get_batch(train_data, batch_size, seq_len, device)
             
             with torch.amp.autocast(device_type='cuda', enabled=(scaler is not None)):
                 logits = model(x)
@@ -483,16 +494,20 @@ if __name__ == "__main__":
             scheduler.step()
             
             if i % 500 == 0:
-                val_loss = estimate_loss(model, data, batch_size=batch_size, seq_len=seq_len, device=device)
+                # Validate on val_data
+                val_loss = estimate_loss(model, val_data, batch_size=batch_size, seq_len=seq_len, device=device)
                 print(f"Iter {i} | Train: {loss.item():.4f} | Val: {val_loss:.4f}")
+                
                 if val_loss < best_loss:
                     best_loss = val_loss
                     torch.save(model.state_dict(), 'best_model.pt')
-                    print(sample(model, data[0].item(), tokenizer, max_len=100, device=device))
+                    # Sample from validation data start to see if it generalizes
+                    print(sample(model, val_data[0].item(), tokenizer, max_len=100, device=device))
 
     elif mode == '2':
         folder = input("Folder path: ")
         col = input("Text column: ")
         loader = ParquetDataLoader(folder, col, tokenizer)
+        # Note: Parquet mode splits are usually handled by file separation or custom logic
         train_on_parquet_files(model, optimizer, None, loader, device, vocab_size, 
                                batch_size, seq_len, 1000, float('inf'), tokenizer, scaler)
