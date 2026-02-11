@@ -377,6 +377,7 @@ def chat_mode(model, device, tokenizer):
 # -----------------------------
 # Training Logic
 # -----------------------------
+
 def train_on_parquet_files(model, optimizer, scheduler, data_loader, device, vocab_size, 
                            batch_size, seq_len, eval_interval, best_loss, tokenizer, scaler=None):
     
@@ -385,14 +386,24 @@ def train_on_parquet_files(model, optimizer, scheduler, data_loader, device, voc
     for epoch, (file_path, chunk_generator) in enumerate(data_loader.iterate_files(), 1):
         print(f"\nProcessing File {epoch}/{total_files}: {Path(file_path).name}")
         
-        for chunk_data in chunk_generator:
-            if len(chunk_data) < seq_len + 1: continue
+        for raw_chunk in chunk_generator:
+            # CRITICAL FIX: Split the incoming chunk into Train (90%) and Val (10%)
+            split_idx = int(len(raw_chunk) * 0.9)
+            train_chunk = raw_chunk[:split_idx]
+            val_chunk = raw_chunk[split_idx:]
             
-            max_batches = (len(chunk_data) - seq_len - 1) // (batch_size * seq_len)
+            # Ensure we have enough data in both splits
+            if len(train_chunk) < seq_len + 1 or len(val_chunk) < seq_len + 1:
+                print("Chunk too small to split, skipping...")
+                continue
+            
+            # Calculate batches based on TRAIN chunk only
+            max_batches = (len(train_chunk) - seq_len - 1) // (batch_size * seq_len)
             if max_batches == 0: continue
             
             for i in range(max_batches):
-                x_batch, y_batch = get_batch(chunk_data, batch_size, seq_len, device)
+                # Train ONLY on train_chunk
+                x_batch, y_batch = get_batch(train_chunk, batch_size, seq_len, device)
                 
                 # Mixed Precision
                 with torch.amp.autocast(device_type='cuda', enabled=(scaler is not None)):
@@ -414,16 +425,20 @@ def train_on_parquet_files(model, optimizer, scheduler, data_loader, device, voc
                 if scheduler: scheduler.step()
                 
                 if i % eval_interval == 0:
-                    val_loss = estimate_loss(model, chunk_data, eval_iters=20, batch_size=batch_size, 
+                    # Validate ONLY on val_chunk
+                    # We use a smaller eval_iters because val_chunk might be small
+                    val_loss = estimate_loss(model, val_chunk, eval_iters=10, batch_size=batch_size, 
                                            seq_len=seq_len, device=device, vocab_size=vocab_size)
+                    
                     print(f"Iter {i} | Train: {loss.item():.4f} | Val: {val_loss:.4f}")
                     
                     if val_loss < best_loss:
                         best_loss = val_loss
                         print(f"✨ New best loss! {best_loss:.4f}")
                         torch.save(model.state_dict(), 'best_model.pt')
-                        # Sample to verify quality
-                        print(sample(model, chunk_data[0].item(), tokenizer, max_len=100, device=device))
+                        # Sample using the validation context to see generalization
+                        print(sample(model, val_chunk[0].item(), tokenizer, max_len=100, device=device))
+                        
     return best_loss
 
 if __name__ == "__main__":
